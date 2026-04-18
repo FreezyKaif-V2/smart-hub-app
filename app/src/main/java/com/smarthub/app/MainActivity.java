@@ -4,14 +4,19 @@ import android.app.Activity;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.media.audiofx.AutomaticGainControl;
+import android.media.audiofx.NoiseSuppressor;
 import android.os.Bundle;
-import android.os.Environment;
 import android.util.Log;
 import android.widget.TextView;
 import org.vosk.Model;
 import org.vosk.Recognizer;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
@@ -27,18 +32,18 @@ public class MainActivity extends Activity {
     private Model model;
     private Recognizer recognizer;
     
-    // UI Elements
     private TextView statusText;
     private TextView volumeText;
     private TextView logText;
 
     private boolean wakeWordDetected = false;
+    private File currentPcmFile;
     private FileOutputStream pcmOut;
     private int silenceFrames = 0;
     private int totalRecordingFrames = 0;
     
-    // RMS threshold is usually between 50 and 300 for a quiet room.
-    private final int SILENCE_RMS_THRESHOLD = 200; 
+    // Auto-Calibrating Noise Floor
+    private double baselineRMS = 100.0; 
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -49,46 +54,33 @@ public class MainActivity extends Activity {
         volumeText = findViewById(R.id.volumeText);
         logText = findViewById(R.id.logText);
 
-        logToScreen("System Booting...");
+        logToScreen("Booting V3 System...");
 
         new Thread(() -> {
             try {
-                logToScreen("Unpacking AI Model (May take a minute on J2)...");
                 String modelPath = copyAssets();
                 model = new Model(modelPath);
-                recognizer = new Recognizer(model, SAMPLE_RATE);
+                
+                // GRAMMAR LOCK: Only loads "alexa" into RAM. Massive speed boost for J2.
+                recognizer = new Recognizer(model, SAMPLE_RATE, "[\"alexa\", \"[unk]\"]");
                 
                 runOnUiThread(() -> {
                     statusText.setText("READY");
-                    statusText.setTextColor(0xFF00FF00); // Green
+                    statusText.setTextColor(0xFF00FF00);
                 });
-                logToScreen("Model loaded. Listening for 'alexa'...");
+                logToScreen("Grammar locked. Listening for 'alexa'...");
                 startMicrophone();
             } catch (Exception e) {
                 logToScreen("ERROR: " + e.getMessage());
-                runOnUiThread(() -> {
-                    statusText.setText("ERROR");
-                    statusText.setTextColor(0xFFFF0000); // Red
-                });
             }
         }).start();
     }
 
     private void logToScreen(String message) {
         String time = new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date());
-        String logEntry = "[" + time + "] " + message + "\n";
-        runOnUiThread(() -> {
-            logText.append(logEntry);
-            // Optional: Log to standard logcat too
-            Log.d("SmartHub", message); 
-        });
+        runOnUiThread(() -> logText.append("[" + time + "] " + message + "\n"));
     }
 
-    private void updateVolumeUI(int volume) {
-        runOnUiThread(() -> volumeText.setText("Current Volume (RMS): " + volume));
-    }
-
-    // Asset copying remains the same
     private String copyAssets() {
         File assetDir = getExternalFilesDir(null);
         File modelDir = new File(assetDir, "model");
@@ -99,31 +91,37 @@ public class MainActivity extends Activity {
         return modelDir.getAbsolutePath();
     }
 
-    private void copyAssetFolder(String srcName, String dstName) {
+    private void copyAssetFolder(String src, String dst) {
         try {
-            String[] list = getAssets().list(srcName);
+            String[] list = getAssets().list(src);
             if (list == null || list.length == 0) return;
             for (String file : list) {
-                String src = srcName + "/" + file;
-                String dest = dstName + "/" + file;
+                String s = src + "/" + file;
+                String d = dst + "/" + file;
                 if (file.contains(".")) {
-                    InputStream in = getAssets().open(src);
-                    OutputStream out = new FileOutputStream(dest);
-                    byte[] buffer = new byte[1024];
-                    int read;
-                    while ((read = in.read(buffer)) != -1) { out.write(buffer, 0, read); }
+                    InputStream in = getAssets().open(s);
+                    OutputStream out = new FileOutputStream(d);
+                    byte[] buf = new byte[1024];
+                    int r;
+                    while ((r = in.read(buf)) != -1) out.write(buf, 0, r);
                     in.close(); out.close();
                 } else {
-                    new File(dest).mkdirs();
-                    copyAssetFolder(src, dest);
+                    new File(d).mkdirs();
+                    copyAssetFolder(s, d);
                 }
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {}
     }
 
     private void startMicrophone() {
         int bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
         audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
+        
+        // HARDWARE AUDIO CLEANUP
+        int audioSessionId = audioRecord.getAudioSessionId();
+        if (NoiseSuppressor.isAvailable()) { NoiseSuppressor.create(audioSessionId).setEnabled(true); }
+        if (AutomaticGainControl.isAvailable()) { AutomaticGainControl.create(audioSessionId).setEnabled(true); }
+
         audioRecord.startRecording();
         isListening = true;
 
@@ -134,27 +132,25 @@ public class MainActivity extends Activity {
             while (isListening) {
                 int read = audioRecord.read(buffer, 0, buffer.length);
                 if (read > 0) {
-                    
-                    // Calculate RMS (Root Mean Square) for volume
                     double sum = 0;
-                    for (int i = 0; i < read; i++) {
-                        sum += buffer[i] * buffer[i];
-                    }
+                    for (int i = 0; i < read; i++) sum += buffer[i] * buffer[i];
                     int rms = (int) Math.sqrt(sum / read);
                     
-                    // Update UI volume every ~15 frames to prevent UI lag
                     loopCounter++;
-                    if (loopCounter % 15 == 0) { updateVolumeUI(rms); }
+                    if (loopCounter % 15 == 0) { 
+                        runOnUiThread(() -> volumeText.setText(String.format("Vol: %d | Base: %d", rms, (int)baselineRMS)));
+                    }
 
                     if (!wakeWordDetected) {
-                        // Phase 1: Wake Word Spotting
+                        // Continuously calibrate background noise
+                        baselineRMS = (baselineRMS * 0.95) + (rms * 0.05);
+
                         if (recognizer.acceptWaveForm(buffer, read)) {
                             if (recognizer.getResult().toLowerCase().contains("alexa")) startCommandRecording();
                         } else {
                             if (recognizer.getPartialResult().toLowerCase().contains("alexa")) startCommandRecording();
                         }
                     } else {
-                        // Phase 2: Command Recording & Silence Detection
                         try {
                             byte[] bData = new byte[read * 2];
                             for (int i = 0; i < read; i++) {
@@ -164,23 +160,20 @@ public class MainActivity extends Activity {
                             pcmOut.write(bData);
                             totalRecordingFrames++;
 
-                            if (rms < SILENCE_RMS_THRESHOLD) {
+                            // Dynamic Threshold: Silence is 50% louder than baseline
+                            int dynamicThreshold = (int) (baselineRMS * 1.5) + 30;
+
+                            if (rms < dynamicThreshold) {
                                 silenceFrames++;
                             } else {
                                 silenceFrames = 0; 
                             }
 
-                            // 1.5 Seconds of silence = (16000 / 512) * 1.5 ≈ 47 frames
-                            // Hard timeout: 8 seconds maximum recording ≈ 250 frames
-                            if (silenceFrames > 47) {
-                                logToScreen("Silence detected. Stopping.");
-                                stopCommandRecording();
-                            } else if (totalRecordingFrames > 250) {
-                                logToScreen("Max time reached. Force stopping.");
+                            // ~1.5 Seconds of silence or 8 Seconds Max
+                            if (silenceFrames > 47 || totalRecordingFrames > 250) {
                                 stopCommandRecording();
                             }
-                            
-                        } catch (Exception e) { e.printStackTrace(); }
+                        } catch (Exception e) {}
                     }
                 }
             }
@@ -194,17 +187,16 @@ public class MainActivity extends Activity {
         totalRecordingFrames = 0;
         
         runOnUiThread(() -> {
-            statusText.setText("LISTENING TO COMMAND");
-            statusText.setTextColor(0xFF0000FF); // Blue
+            statusText.setText("RECORDING COMMAND");
+            statusText.setTextColor(0xFF0000FF);
         });
-        logToScreen(">>> Wake word detected!");
         
         try {
-            File dir = getExternalFilesDir(null); // Safer storage location
-            File file = new File(dir, "cmd_" + System.currentTimeMillis() + ".pcm");
-            pcmOut = new FileOutputStream(file);
-            logToScreen("Recording to: " + file.getName());
-        } catch (Exception e) { logToScreen("Storage Error: " + e.getMessage()); }
+            File dir = getExternalFilesDir(null);
+            currentPcmFile = new File(dir, "temp.pcm");
+            pcmOut = new FileOutputStream(currentPcmFile);
+            logToScreen("Wake word hit. Recording audio...");
+        } catch (Exception e) {}
     }
 
     private void stopCommandRecording() {
@@ -212,11 +204,58 @@ public class MainActivity extends Activity {
         try { if (pcmOut != null) pcmOut.close(); } catch (Exception e) {}
         recognizer.reset();
         
+        logToScreen("Speech ended. Converting to WAV...");
+        
+        File dir = getExternalFilesDir(null);
+        File wavFile = new File(dir, "cmd_" + System.currentTimeMillis() + ".wav");
+        
+        try {
+            rawToWave(currentPcmFile, wavFile);
+            currentPcmFile.delete(); // Clean up temp file
+            logToScreen("Saved: " + wavFile.getName());
+        } catch (IOException e) {
+            logToScreen("WAV Conversion failed.");
+        }
+
         runOnUiThread(() -> {
             statusText.setText("READY");
-            statusText.setTextColor(0xFF00FF00); // Green
+            statusText.setTextColor(0xFF00FF00);
         });
-        logToScreen("<<< Saved command. Resuming wake word search.");
+    }
+
+    // --- WAV CONVERTER UTILS ---
+    private void rawToWave(final File rawFile, final File waveFile) throws IOException {
+        byte[] rawData = new byte[(int) rawFile.length()];
+        DataInputStream input = new DataInputStream(new FileInputStream(rawFile));
+        input.readFully(rawData);
+        input.close();
+
+        DataOutputStream output = new DataOutputStream(new FileOutputStream(waveFile));
+        writeString(output, "RIFF");
+        writeInt(output, 36 + rawData.length);
+        writeString(output, "WAVE");
+        writeString(output, "fmt ");
+        writeInt(output, 16);
+        writeShort(output, (short) 1);
+        writeShort(output, (short) 1);
+        writeInt(output, SAMPLE_RATE);
+        writeInt(output, SAMPLE_RATE * 2);
+        writeShort(output, (short) 2);
+        writeShort(output, (short) 16);
+        writeString(output, "data");
+        writeInt(output, rawData.length);
+        output.write(rawData);
+        output.close();
+    }
+
+    private void writeInt(final DataOutputStream out, final int val) throws IOException {
+        out.write(val >> 0); out.write(val >> 8); out.write(val >> 16); out.write(val >> 24);
+    }
+    private void writeShort(final DataOutputStream out, final short val) throws IOException {
+        out.write(val >> 0); out.write(val >> 8);
+    }
+    private void writeString(final DataOutputStream out, final String val) throws IOException {
+        for (int i = 0; i < val.length(); i++) out.write(val.charAt(i));
     }
 
     @Override
