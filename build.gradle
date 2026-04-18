@@ -12,5 +12,7 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // Adding the official Vosk repository
+        maven { url 'https://alphacephei.com/maven/' }
     }
 }
