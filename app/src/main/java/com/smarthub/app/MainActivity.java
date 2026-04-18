@@ -137,7 +137,6 @@ public class MainActivity extends Activity implements RecognitionListener {
                 if (silence > 62 || total > 312) break;
                 
                 if (total % 10 == 0) {
-                    // FIX: Create final snapshot variables for the UI thread
                     final int displayRms = rms;
                     final int displayBase = (int) rollingBase;
                     runOnUiThread(() -> volumeText.setText("Vol: " + displayRms + " | Base: " + displayBase));
@@ -165,8 +164,10 @@ public class MainActivity extends Activity implements RecognitionListener {
     }
 
     private void copyAssets(File assetDir) throws IOException {
+        // ADDED missing files to the copy list
         String[] files = {"en-us-ptm/mdef", "en-us-ptm/means", "en-us-ptm/sendump", 
-                          "en-us-ptm/variances", "en-us-ptm/transition_matrices", "custom.dict"};
+                          "en-us-ptm/variances", "en-us-ptm/transition_matrices", 
+                          "en-us-ptm/noisedict", "en-us-ptm/feat.params", "custom.dict"};
         for (String f : files) {
             File dest = new File(assetDir, f);
             if (!dest.getParentFile().exists()) dest.getParentFile().mkdirs();
