@@ -1,0 +1,30 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.smarthub.app'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId "com.smarthub.app"
+        minSdk 21
+        targetSdk 22
+        versionCode 1
+        versionName "1.0"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    
+    aaptOptions {
+        noCompress "sync"
+    }
+}
+
+dependencies {
+    implementation 'com.alphacep:vosk-android:0.3.32'
+    implementation 'net.java.dev.jna:jna:5.8.0@aar'
+}
