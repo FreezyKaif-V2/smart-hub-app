@@ -9,7 +9,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="DIY Smart Hub"
+        android:text="DIY Smart Hub (Offline)"
         android:textColor="#FFFFFF"
         android:textSize="28sp"
         android:textStyle="bold"
@@ -31,10 +31,27 @@
         android:id="@+id/volumeText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Volume: 0"
+        android:text="Volume: N/A"
         android:textColor="#AAAAAA"
         android:textSize="16sp"
         android:gravity="center"
+        android:layout_marginBottom="8dp"/>
+
+    <TextView
+        android:id="@+id/sensLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Sensitivity Exp: 1e-20 (Higher = Stricter)"
+        android:textColor="#AAAAAA"
+        android:textSize="14sp"
+        android:layout_marginTop="8dp"/>
+
+    <SeekBar
+        android:id="@+id/sensSlider"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="50"
+        android:progress="20"
         android:layout_marginBottom="16dp"/>
 
     <ScrollView
