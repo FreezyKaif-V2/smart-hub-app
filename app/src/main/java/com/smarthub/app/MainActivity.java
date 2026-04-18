@@ -3,6 +3,8 @@ package com.smarthub.app;
 import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
@@ -36,16 +38,17 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
         sensLabel = findViewById(R.id.sensLabel);
         SeekBar sensSlider = findViewById(R.id.sensSlider);
 
-        // Initialize Native Speech Recognizer
         systemRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
         speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
         speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+        // Explicitly request offline mode for older Google App versions
+        speechIntent.putExtra("android.speech.extra.PREFER_OFFLINE", true); 
 
         setupSystemSpeechListener();
 
-        logToScreen("V7 Hub Booting (Pure STT Mode)...");
+        logToScreen("V7.1 Hub Booting (Hardware Lock Fix)...");
 
         sensSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar s, int p, boolean f) {
@@ -110,7 +113,9 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
             @Override public void onReadyForSpeech(Bundle params) {
                 logToScreen("Google STT is listening...");
             }
-            @Override public void onBeginningOfSpeech() {}
+            @Override public void onBeginningOfSpeech() {
+                logToScreen("Speech detected by Google...");
+            }
             @Override public void onRmsChanged(float rmsdB) {}
             @Override public void onBufferReceived(byte[] buffer) {}
             @Override public void onEndOfSpeech() {
@@ -118,6 +123,7 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
                     statusText.setText("PROCESSING...");
                     statusText.setTextColor(0xFFFFA500); // Orange
                 });
+                logToScreen("Speech ended. Processing...");
             }
             @Override public void onError(int error) { 
                 String message = "Unknown";
@@ -155,10 +161,13 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
             statusText.setTextColor(0xFF0000FF);
         });
         
-        logToScreen(">>> Alexa detected. Handing mic to Google...");
+        logToScreen(">>> Alexa detected. Releasing hardware mic...");
         
-        // Start System Speech-to-Text on UI thread
-        runOnUiThread(() -> systemRecognizer.startListening(speechIntent));
+        // CRITICAL FIX: Give PocketSphinx 400ms to completely release the microphone
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            logToScreen("Handing mic to Google...");
+            systemRecognizer.startListening(speechIntent);
+        }, 400);
     }
 
     private void restartWakeWord() {
