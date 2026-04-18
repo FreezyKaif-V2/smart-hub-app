@@ -2,10 +2,6 @@ package com.smarthub.app;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.media.AudioFormat;
-import android.media.AudioRecord;
-import android.media.MediaRecorder;
-import android.media.audiofx.NoiseSuppressor;
 import android.os.Bundle;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -22,7 +18,6 @@ import edu.cmu.pocketsphinx.Hypothesis;
 import edu.cmu.pocketsphinx.SpeechRecognizerSetup;
 
 public class MainActivity extends Activity implements edu.cmu.pocketsphinx.RecognitionListener {
-    private static final int SAMPLE_RATE = 16000;
     private edu.cmu.pocketsphinx.SpeechRecognizer wakeRecognizer;
     private SpeechRecognizer systemRecognizer;
     private Intent speechIntent;
@@ -45,13 +40,12 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
         systemRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
         speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        // "en-IN" is strictly required to leverage Google's native Hinglish models
         speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
         speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
 
         setupSystemSpeechListener();
 
-        logToScreen("V6 Hub Booting (Transcription Enabled)...");
+        logToScreen("V7 Hub Booting (Pure STT Mode)...");
 
         sensSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar s, int p, boolean f) {
@@ -99,8 +93,13 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
             @Override public void onResults(Bundle b) {
                 ArrayList<String> matches = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                 if (matches != null && !matches.isEmpty()) {
-                    logToScreen("TRANSCRIPTION: " + matches.get(0));
+                    String transcription = matches.get(0);
+                    logToScreen("TRANSCRIPTION: " + transcription);
+                    runOnUiThread(() -> volumeText.setText("Cmd: " + transcription));
+                } else {
+                    logToScreen("Google STT returned empty.");
                 }
+                restartWakeWord();
             }
             @Override public void onPartialResults(Bundle b) {
                 ArrayList<String> matches = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
@@ -108,12 +107,34 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
                     runOnUiThread(() -> volumeText.setText("Live: " + matches.get(0)));
                 }
             }
-            @Override public void onReadyForSpeech(Bundle params) {}
+            @Override public void onReadyForSpeech(Bundle params) {
+                logToScreen("Google STT is listening...");
+            }
             @Override public void onBeginningOfSpeech() {}
             @Override public void onRmsChanged(float rmsdB) {}
             @Override public void onBufferReceived(byte[] buffer) {}
-            @Override public void onEndOfSpeech() {}
-            @Override public void onError(int error) { logToScreen("STT Code: " + error); }
+            @Override public void onEndOfSpeech() {
+                runOnUiThread(() -> {
+                    statusText.setText("PROCESSING...");
+                    statusText.setTextColor(0xFFFFA500); // Orange
+                });
+            }
+            @Override public void onError(int error) { 
+                String message = "Unknown";
+                switch (error) {
+                    case SpeechRecognizer.ERROR_AUDIO: message = "Audio recording error (Mic locked?)"; break;
+                    case SpeechRecognizer.ERROR_CLIENT: message = "Client side error"; break;
+                    case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: message = "Insufficient permissions"; break;
+                    case SpeechRecognizer.ERROR_NETWORK: message = "Network error (No offline model?)"; break;
+                    case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: message = "Network timeout"; break;
+                    case SpeechRecognizer.ERROR_NO_MATCH: message = "No match (Didn't catch that)"; break;
+                    case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: message = "RecognitionService busy"; break;
+                    case SpeechRecognizer.ERROR_SERVER: message = "Error from server"; break;
+                    case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: message = "No speech input"; break;
+                }
+                logToScreen("STT Error: " + message); 
+                restartWakeWord();
+            }
             @Override public void onEvent(int eventType, Bundle params) {}
         });
     }
@@ -122,78 +143,31 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
     public void onPartialResult(Hypothesis hp) {
         if (hp != null && hp.getHypstr().contains("alexa")) {
             wakeRecognizer.cancel(); 
-            startCommandRecording();
+            startCommandTranscription();
         }
     }
 
-    private synchronized void startCommandRecording() {
+    private synchronized void startCommandTranscription() {
         if (isRecording) return;
         isRecording = true;
         runOnUiThread(() -> {
-            statusText.setText("LISTENING...");
+            statusText.setText("LISTENING (Google STT)");
             statusText.setTextColor(0xFF0000FF);
         });
         
-        logToScreen(">>> Alexa detected. Recording + Transcribing...");
+        logToScreen(">>> Alexa detected. Handing mic to Google...");
         
-        // Start System Speech-to-Text simultaneously
+        // Start System Speech-to-Text on UI thread
         runOnUiThread(() -> systemRecognizer.startListening(speechIntent));
-        
-        new Thread(this::runAudioLoop).start();
     }
 
-    private void runAudioLoop() {
-        int bSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        AudioRecord ar = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bSize);
-        if (NoiseSuppressor.isAvailable()) { NoiseSuppressor.create(ar.getAudioSessionId()).setEnabled(true); }
-
-        File pcm = new File(getExternalFilesDir(null), "temp.pcm");
-        try (FileOutputStream out = new FileOutputStream(pcm)) {
-            ar.startRecording();
-            short[] buf = new short[512];
-            int silence = 0, total = 0;
-            double rollingBase = 800.0;
-
-            while (isRecording) {
-                int read = ar.read(buf, 0, buf.length);
-                if (read <= 0) continue;
-                double sum = 0;
-                for (int i = 0; i < read; i++) sum += buf[i] * buf[i];
-                int rms = (int) Math.sqrt(sum / read);
-
-                if (total < 20) rollingBase = (rollingBase * 0.9) + (rms * 0.1);
-                
-                byte[] bData = new byte[read * 2];
-                for (int i = 0; i < read; i++) {
-                    bData[i*2] = (byte)(buf[i] & 0xff);
-                    bData[i*2+1] = (byte)(buf[i] >> 8);
-                }
-                out.write(bData);
-                total++;
-
-                // Wait time reduced: silence > 25 frames (~0.7 seconds)
-                if (rms < (rollingBase * 1.3 + 80) && total > 15) {
-                    silence++;
-                } else {
-                    silence = 0;
-                }
-
-                if (silence > 25 || total > 350) break;
-            }
-            ar.stop(); ar.release();
-            
-            runOnUiThread(() -> systemRecognizer.stopListening());
-            
-            File wav = new File(getExternalFilesDir(null), "cmd_" + System.currentTimeMillis() + ".wav");
-            rawToWave(pcm, wav);
-            logToScreen("File Saved: " + wav.getName());
-        } catch (Exception e) { logToScreen("Rec Fail"); }
-        
+    private void restartWakeWord() {
         isRecording = false;
         runOnUiThread(() -> {
             wakeRecognizer.startListening("WAKE");
             statusText.setText("READY");
             statusText.setTextColor(0xFF00FF00);
+            volumeText.setText("Volume: N/A");
         });
     }
 
@@ -213,20 +187,6 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
                  OutputStream out = new FileOutputStream(dest)) {
                 byte[] b = new byte[1024]; int r; while ((r = in.read(b)) != -1) out.write(b, 0, r);
             }
-        }
-    }
-
-    private void rawToWave(File raw, File wav) throws IOException {
-        byte[] data = new byte[(int) raw.length()];
-        try (DataInputStream in = new DataInputStream(new FileInputStream(raw))) { in.readFully(data); }
-        try (DataOutputStream out = new DataOutputStream(new FileOutputStream(wav))) {
-            out.writeBytes("RIFF"); out.writeInt(Integer.reverseBytes(36 + data.length));
-            out.writeBytes("WAVE"); out.writeBytes("fmt "); out.writeInt(Integer.reverseBytes(16));
-            out.writeShort(Short.reverseBytes((short) 1)); out.writeShort(Short.reverseBytes((short) 1));
-            out.writeInt(Integer.reverseBytes(SAMPLE_RATE)); out.writeInt(Integer.reverseBytes(SAMPLE_RATE * 2));
-            out.writeShort(Short.reverseBytes((short) 2)); out.writeShort(Short.reverseBytes((short) 16));
-            out.writeBytes("data"); out.writeInt(Integer.reverseBytes(data.length));
-            out.write(data);
         }
     }
 
