@@ -12,11 +12,22 @@ android {
         targetSdk 22
         versionCode 1
         versionName "1.0"
+        
+        // Ensure the old J2 can handle the library loading
+        ndk {
+            abiFilters "armeabi-v7a", "x86"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
     
     aaptOptions {
