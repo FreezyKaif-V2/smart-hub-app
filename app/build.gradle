@@ -19,8 +19,8 @@ android {
         applicationId "com.smarthub.app"
         minSdk 21
         targetSdk 22
-        versionCode 4
-        versionName "4.0"
+        versionCode 5
+        versionName "5.0"
     }
 
     buildTypes {
@@ -38,6 +38,6 @@ android {
 }
 
 dependencies {
-    // This pulls the library directly from GitHub via JitPack
-    implementation 'com.github.cmusphinx:pocketsphinx-android:5prealpha-SNAPSHOT'
+    // This tells Gradle to use the .aar file you just downloaded
+    implementation fileTree(dir: 'libs', include: ['*.aar'])
 }

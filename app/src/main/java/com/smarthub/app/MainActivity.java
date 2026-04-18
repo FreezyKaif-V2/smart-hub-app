@@ -8,15 +8,7 @@ import android.media.audiofx.NoiseSuppressor;
 import android.os.Bundle;
 import android.widget.SeekBar;
 import android.widget.TextView;
-
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -30,6 +22,7 @@ public class MainActivity extends Activity implements RecognitionListener {
     private static final int SAMPLE_RATE = 16000;
     private SpeechRecognizer recognizer;
     private TextView statusText, volumeText, logText, sensLabel;
+    private boolean isRecording = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -42,12 +35,11 @@ public class MainActivity extends Activity implements RecognitionListener {
         sensLabel = findViewById(R.id.sensLabel);
         SeekBar sensSlider = findViewById(R.id.sensSlider);
 
-        logToScreen("Booting V5 (PocketSphinx)...");
+        logToScreen("V5 Local Engine Booting...");
 
         sensSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar s, int p, boolean f) {
-                int val = Math.max(p, 1);
-                sensLabel.setText("Sensitivity Exp: 1e-" + val);
+                sensLabel.setText("Sensitivity Exp: 1e-" + Math.max(p, 1));
             }
             @Override public void onStartTrackingTouch(SeekBar s) {}
             @Override public void onStopTrackingTouch(SeekBar s) {
@@ -61,14 +53,14 @@ public class MainActivity extends Activity implements RecognitionListener {
     private void initPocketSphinx(int sensitivity) {
         new Thread(() -> {
             try {
-                runOnUiThread(() -> statusText.setText("LOADING..."));
+                runOnUiThread(() -> statusText.setText("SYNCING ASSETS..."));
                 File assetDir = new File(getExternalFilesDir(null), "sync");
-                if (!new File(assetDir, "en-us-ptm").exists()) { copyAssets(); }
+                copyAssets(assetDir);
                 
-                // Set threshold
+                // Set threshold locally
                 String kws = "alexa /1e-" + sensitivity + "/\n";
-                FileOutputStream fos = new FileOutputStream(new File(assetDir, "keywords.kws"));
-                fos.write(kws.getBytes()); fos.close();
+                File kwsFile = new File(assetDir, "keywords.kws");
+                try (FileOutputStream fos = new FileOutputStream(kwsFile)) { fos.write(kws.getBytes()); }
 
                 if (recognizer != null) { recognizer.cancel(); recognizer.shutdown(); }
 
@@ -77,26 +69,29 @@ public class MainActivity extends Activity implements RecognitionListener {
                         .setDictionary(new File(assetDir, "custom.dict"))
                         .getRecognizer();
                 recognizer.addListener(this);
-                recognizer.addKeywordSearch("WAKE", new File(assetDir, "keywords.kws"));
+                recognizer.addKeywordSearch("WAKE", kwsFile);
                 
                 runOnUiThread(() -> {
                     recognizer.startListening("WAKE");
                     statusText.setText("READY");
                     statusText.setTextColor(0xFF00FF00);
+                    logToScreen("Listening... (Exp: 1e-" + sensitivity + ")");
                 });
-            } catch (Exception e) { logToScreen("Error: " + e.getMessage()); }
+            } catch (Exception e) { logToScreen("Init Error: " + e.getMessage()); }
         }).start();
     }
 
     @Override
     public void onPartialResult(Hypothesis hp) {
-        if (hp != null && hp.getHypstr().equals("alexa")) {
-            recognizer.cancel();
+        if (hp != null && hp.getHypstr().contains("alexa")) {
+            recognizer.cancel(); 
             startCommandRecording();
         }
     }
 
-    private void startCommandRecording() {
+    private synchronized void startCommandRecording() {
+        if (isRecording) return;
+        isRecording = true;
         runOnUiThread(() -> {
             statusText.setText("RECORDING");
             statusText.setTextColor(0xFF0000FF);
@@ -114,16 +109,18 @@ public class MainActivity extends Activity implements RecognitionListener {
             ar.startRecording();
             short[] buf = new short[512];
             int silence = 0, total = 0;
-            double base = 100.0;
+            double rollingBase = 800.0; // Starting at your reported noisy floor
 
-            while (true) {
+            while (isRecording) {
                 int read = ar.read(buf, 0, buf.length);
                 if (read <= 0) continue;
                 
                 double sum = 0;
                 for (int i = 0; i < read; i++) sum += buf[i] * buf[i];
                 int rms = (int) Math.sqrt(sum / read);
-                if (total < 10) base = (base * 0.8) + (rms * 0.2);
+
+                // Update base for first 1s
+                if (total < 30) rollingBase = (rollingBase * 0.95) + (rms * 0.05);
 
                 byte[] bData = new byte[read * 2];
                 for (int i = 0; i < read; i++) {
@@ -133,17 +130,34 @@ public class MainActivity extends Activity implements RecognitionListener {
                 out.write(bData);
                 total++;
 
-                if (rms < (base * 1.5 + 50) && total > 10) silence++; else silence = 0;
-                if (silence > 45 || total > 300) break;
+                // If volume is less than 20% above base, count as silence
+                if (rms < (rollingBase * 1.2 + 100) && total > 20) {
+                    silence++;
+                } else {
+                    silence = 0;
+                }
+
+                // Hard Stop: 2s silence or 10s max
+                if (silence > 62 || total > 312) break;
+                
+                if (total % 10 == 0) {
+                    runOnUiThread(() -> volumeText.setText("Vol: " + rms + " | Base: " + (int)rollingBase));
+                }
             }
             ar.stop(); ar.release();
             
             File wav = new File(getExternalFilesDir(null), "cmd_" + System.currentTimeMillis() + ".wav");
             rawToWave(pcm, wav);
             logToScreen("Saved: " + wav.getName());
-        } catch (Exception e) { logToScreen("Rec Error"); }
+        } catch (Exception e) { logToScreen("Rec Fail"); }
         
-        runOnUiThread(() -> { recognizer.startListening("WAKE"); statusText.setText("READY"); statusText.setTextColor(0xFF00FF00); });
+        isRecording = false;
+        runOnUiThread(() -> {
+            recognizer.startListening("WAKE");
+            statusText.setText("READY");
+            statusText.setTextColor(0xFF00FF00);
+            volumeText.setText("Volume: N/A");
+        });
     }
 
     private void logToScreen(String msg) {
@@ -151,24 +165,16 @@ public class MainActivity extends Activity implements RecognitionListener {
         runOnUiThread(() -> logText.append("[" + t + "] " + msg + "\n"));
     }
 
-    private void copyAssets() {
-        File dir = new File(getExternalFilesDir(null), "sync");
-        dir.mkdirs();
-        try {
-            for (String f : getAssets().list("sync")) {
-                if (f.equals("en-us-ptm")) {
-                    new File(dir, f).mkdirs();
-                    for (String sub : getAssets().list("sync/" + f)) {
-                        copyFile("sync/" + f + "/" + sub, new File(dir, f + "/" + sub));
-                    }
-                } else { copyFile("sync/" + f, new File(dir, f)); }
+    private void copyAssets(File assetDir) throws IOException {
+        String[] files = {"en-us-ptm/mdef", "en-us-ptm/means", "en-us-ptm/sendump", 
+                          "en-us-ptm/variances", "en-us-ptm/transition_matrices", "custom.dict"};
+        for (String f : files) {
+            File dest = new File(assetDir, f);
+            if (!dest.getParentFile().exists()) dest.getParentFile().mkdirs();
+            try (InputStream in = getAssets().open("sync/" + f); 
+                 OutputStream out = new FileOutputStream(dest)) {
+                byte[] b = new byte[1024]; int r; while ((r = in.read(b)) != -1) out.write(b, 0, r);
             }
-        } catch (Exception e) {}
-    }
-
-    private void copyFile(String src, File dst) throws IOException {
-        try (InputStream in = getAssets().open(src); OutputStream out = new FileOutputStream(dst)) {
-            byte[] b = new byte[1024]; int r; while ((r = in.read(b)) != -1) out.write(b, 0, r);
         }
     }
 
@@ -189,6 +195,6 @@ public class MainActivity extends Activity implements RecognitionListener {
     @Override public void onResult(Hypothesis h) {}
     @Override public void onBeginningOfSpeech() {}
     @Override public void onEndOfSpeech() {}
-    @Override public void onError(Exception e) {}
+    @Override public void onError(Exception e) { logToScreen("PS Error: " + e.getMessage()); }
     @Override public void onTimeout() {}
 }
