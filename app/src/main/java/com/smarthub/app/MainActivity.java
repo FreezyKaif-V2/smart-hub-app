@@ -57,7 +57,6 @@ public class MainActivity extends Activity implements RecognitionListener {
                 File assetDir = new File(getExternalFilesDir(null), "sync");
                 copyAssets(assetDir);
                 
-                // Set threshold locally
                 String kws = "alexa /1e-" + sensitivity + "/\n";
                 File kwsFile = new File(assetDir, "keywords.kws");
                 try (FileOutputStream fos = new FileOutputStream(kwsFile)) { fos.write(kws.getBytes()); }
@@ -109,7 +108,7 @@ public class MainActivity extends Activity implements RecognitionListener {
             ar.startRecording();
             short[] buf = new short[512];
             int silence = 0, total = 0;
-            double rollingBase = 800.0; // Starting at your reported noisy floor
+            double rollingBase = 800.0;
 
             while (isRecording) {
                 int read = ar.read(buf, 0, buf.length);
@@ -119,7 +118,6 @@ public class MainActivity extends Activity implements RecognitionListener {
                 for (int i = 0; i < read; i++) sum += buf[i] * buf[i];
                 int rms = (int) Math.sqrt(sum / read);
 
-                // Update base for first 1s
                 if (total < 30) rollingBase = (rollingBase * 0.95) + (rms * 0.05);
 
                 byte[] bData = new byte[read * 2];
@@ -130,18 +128,19 @@ public class MainActivity extends Activity implements RecognitionListener {
                 out.write(bData);
                 total++;
 
-                // If volume is less than 20% above base, count as silence
                 if (rms < (rollingBase * 1.2 + 100) && total > 20) {
                     silence++;
                 } else {
                     silence = 0;
                 }
 
-                // Hard Stop: 2s silence or 10s max
                 if (silence > 62 || total > 312) break;
                 
                 if (total % 10 == 0) {
-                    runOnUiThread(() -> volumeText.setText("Vol: " + rms + " | Base: " + (int)rollingBase));
+                    // FIX: Create final snapshot variables for the UI thread
+                    final int displayRms = rms;
+                    final int displayBase = (int) rollingBase;
+                    runOnUiThread(() -> volumeText.setText("Vol: " + displayRms + " | Base: " + displayBase));
                 }
             }
             ar.stop(); ar.release();
