@@ -4,10 +4,8 @@ import android.app.Activity;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
-import android.media.audiofx.AutomaticGainControl;
 import android.media.audiofx.NoiseSuppressor;
 import android.os.Bundle;
-import android.util.Log;
 import android.widget.TextView;
 import org.vosk.Model;
 import org.vosk.Recognizer;
@@ -22,6 +20,8 @@ import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 public class MainActivity extends Activity {
     private static final int SAMPLE_RATE = 16000;
@@ -42,8 +42,10 @@ public class MainActivity extends Activity {
     private int silenceFrames = 0;
     private int totalRecordingFrames = 0;
     
-    // Auto-Calibrating Noise Floor
-    private double baselineRMS = 100.0; 
+    private double baselineRMS = 50.0; 
+    
+    // Strict regex: ensures "alexa" is its own standalone word, not part of another word
+    private final Pattern wakeWordPattern = Pattern.compile(".*\\balexa\\b.*");
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,21 +56,21 @@ public class MainActivity extends Activity {
         volumeText = findViewById(R.id.volumeText);
         logText = findViewById(R.id.logText);
 
-        logToScreen("Booting V3 System...");
+        logToScreen("Booting V4 System (Stable Audio)...");
 
         new Thread(() -> {
             try {
                 String modelPath = copyAssets();
                 model = new Model(modelPath);
                 
-                // GRAMMAR LOCK: Only loads "alexa" into RAM. Massive speed boost for J2.
-                recognizer = new Recognizer(model, SAMPLE_RATE, "[\"alexa\", \"[unk]\"]");
+                // Removed Grammar Lock. Giving the AI the full vocabulary prevents false positives.
+                recognizer = new Recognizer(model, SAMPLE_RATE);
                 
                 runOnUiThread(() -> {
                     statusText.setText("READY");
                     statusText.setTextColor(0xFF00FF00);
                 });
-                logToScreen("Grammar locked. Listening for 'alexa'...");
+                logToScreen("Full model loaded. Listening strictly for 'alexa'...");
                 startMicrophone();
             } catch (Exception e) {
                 logToScreen("ERROR: " + e.getMessage());
@@ -117,10 +119,9 @@ public class MainActivity extends Activity {
         int bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
         audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
         
-        // HARDWARE AUDIO CLEANUP
         int audioSessionId = audioRecord.getAudioSessionId();
+        // Kept NoiseSuppressor to cut raw static, but REMOVED AutomaticGainControl
         if (NoiseSuppressor.isAvailable()) { NoiseSuppressor.create(audioSessionId).setEnabled(true); }
-        if (AutomaticGainControl.isAvailable()) { AutomaticGainControl.create(audioSessionId).setEnabled(true); }
 
         audioRecord.startRecording();
         isListening = true;
@@ -142,13 +143,18 @@ public class MainActivity extends Activity {
                     }
 
                     if (!wakeWordDetected) {
-                        // Continuously calibrate background noise
                         baselineRMS = (baselineRMS * 0.95) + (rms * 0.05);
 
-                        if (recognizer.acceptWaveForm(buffer, read)) {
-                            if (recognizer.getResult().toLowerCase().contains("alexa")) startCommandRecording();
-                        } else {
-                            if (recognizer.getPartialResult().toLowerCase().contains("alexa")) startCommandRecording();
+                        // Feed audio to Vosk
+                        boolean isFinal = recognizer.acceptWaveForm(buffer, read);
+                        String resultJson = isFinal ? recognizer.getResult() : recognizer.getPartialResult();
+                        
+                        // Strict Regex Check
+                        if (resultJson != null) {
+                            Matcher matcher = wakeWordPattern.matcher(resultJson.toLowerCase());
+                            if (matcher.matches()) {
+                                startCommandRecording();
+                            }
                         }
                     } else {
                         try {
@@ -160,7 +166,6 @@ public class MainActivity extends Activity {
                             pcmOut.write(bData);
                             totalRecordingFrames++;
 
-                            // Dynamic Threshold: Silence is 50% louder than baseline
                             int dynamicThreshold = (int) (baselineRMS * 1.5) + 30;
 
                             if (rms < dynamicThreshold) {
@@ -169,7 +174,6 @@ public class MainActivity extends Activity {
                                 silenceFrames = 0; 
                             }
 
-                            // ~1.5 Seconds of silence or 8 Seconds Max
                             if (silenceFrames > 47 || totalRecordingFrames > 250) {
                                 stopCommandRecording();
                             }
@@ -211,7 +215,7 @@ public class MainActivity extends Activity {
         
         try {
             rawToWave(currentPcmFile, wavFile);
-            currentPcmFile.delete(); // Clean up temp file
+            currentPcmFile.delete(); 
             logToScreen("Saved: " + wavFile.getName());
         } catch (IOException e) {
             logToScreen("WAV Conversion failed.");
@@ -223,7 +227,6 @@ public class MainActivity extends Activity {
         });
     }
 
-    // --- WAV CONVERTER UTILS ---
     private void rawToWave(final File rawFile, final File waveFile) throws IOException {
         byte[] rawData = new byte[(int) rawFile.length()];
         DataInputStream input = new DataInputStream(new FileInputStream(rawFile));
