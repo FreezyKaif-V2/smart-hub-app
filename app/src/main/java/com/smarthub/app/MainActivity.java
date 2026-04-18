@@ -41,13 +41,12 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
         sensLabel = findViewById(R.id.sensLabel);
         SeekBar sensSlider = findViewById(R.id.sensSlider);
 
-        // Initialize Native Speech Recognizer (For Phase 2 Transcription)
+        // Initialize Native Speech Recognizer
         systemRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
         speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        // Setting multi-language support for Hinglish
+        // "en-IN" is strictly required to leverage Google's native Hinglish models
         speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
-        speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_SUPPORTED, new String[]{"en-IN", "hi-IN"});
         speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
 
         setupSystemSpeechListener();
@@ -183,7 +182,6 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
             }
             ar.stop(); ar.release();
             
-            // Stop transcription engine
             runOnUiThread(() -> systemRecognizer.stopListening());
             
             File wav = new File(getExternalFilesDir(null), "cmd_" + System.currentTimeMillis() + ".wav");
