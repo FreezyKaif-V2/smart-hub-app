@@ -1,26 +1,32 @@
 package com.smarthub.app;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.media.audiofx.NoiseSuppressor;
 import android.os.Bundle;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import java.io.*;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
 
 import edu.cmu.pocketsphinx.Hypothesis;
-import edu.cmu.pocketsphinx.RecognitionListener;
-import edu.cmu.pocketsphinx.SpeechRecognizer;
 import edu.cmu.pocketsphinx.SpeechRecognizerSetup;
 
-public class MainActivity extends Activity implements RecognitionListener {
+public class MainActivity extends Activity implements edu.cmu.pocketsphinx.RecognitionListener {
     private static final int SAMPLE_RATE = 16000;
-    private SpeechRecognizer recognizer;
+    private edu.cmu.pocketsphinx.SpeechRecognizer wakeRecognizer;
+    private SpeechRecognizer systemRecognizer;
+    private Intent speechIntent;
+    
     private TextView statusText, volumeText, logText, sensLabel;
     private boolean isRecording = false;
 
@@ -35,7 +41,18 @@ public class MainActivity extends Activity implements RecognitionListener {
         sensLabel = findViewById(R.id.sensLabel);
         SeekBar sensSlider = findViewById(R.id.sensSlider);
 
-        logToScreen("V5 Local Engine Booting...");
+        // Initialize Native Speech Recognizer (For Phase 2 Transcription)
+        systemRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+        speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        // Setting multi-language support for Hinglish
+        speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
+        speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_SUPPORTED, new String[]{"en-IN", "hi-IN"});
+        speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+
+        setupSystemSpeechListener();
+
+        logToScreen("V6 Hub Booting (Transcription Enabled)...");
 
         sensSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar s, int p, boolean f) {
@@ -53,37 +70,59 @@ public class MainActivity extends Activity implements RecognitionListener {
     private void initPocketSphinx(int sensitivity) {
         new Thread(() -> {
             try {
-                runOnUiThread(() -> statusText.setText("SYNCING ASSETS..."));
                 File assetDir = new File(getExternalFilesDir(null), "sync");
                 copyAssets(assetDir);
-                
-                String kws = "alexa /1e-" + sensitivity + "/\n";
                 File kwsFile = new File(assetDir, "keywords.kws");
+                String kws = "alexa /1e-" + sensitivity + "/\n";
                 try (FileOutputStream fos = new FileOutputStream(kwsFile)) { fos.write(kws.getBytes()); }
 
-                if (recognizer != null) { recognizer.cancel(); recognizer.shutdown(); }
+                if (wakeRecognizer != null) { wakeRecognizer.cancel(); wakeRecognizer.shutdown(); }
 
-                recognizer = SpeechRecognizerSetup.defaultSetup()
+                wakeRecognizer = SpeechRecognizerSetup.defaultSetup()
                         .setAcousticModel(new File(assetDir, "en-us-ptm"))
                         .setDictionary(new File(assetDir, "custom.dict"))
                         .getRecognizer();
-                recognizer.addListener(this);
-                recognizer.addKeywordSearch("WAKE", kwsFile);
+                wakeRecognizer.addListener(this);
+                wakeRecognizer.addKeywordSearch("WAKE", kwsFile);
                 
                 runOnUiThread(() -> {
-                    recognizer.startListening("WAKE");
+                    wakeRecognizer.startListening("WAKE");
                     statusText.setText("READY");
                     statusText.setTextColor(0xFF00FF00);
-                    logToScreen("Listening... (Exp: 1e-" + sensitivity + ")");
+                    logToScreen("Listening for Alexa...");
                 });
             } catch (Exception e) { logToScreen("Init Error: " + e.getMessage()); }
         }).start();
     }
 
+    private void setupSystemSpeechListener() {
+        systemRecognizer.setRecognitionListener(new RecognitionListener() {
+            @Override public void onResults(Bundle b) {
+                ArrayList<String> matches = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                if (matches != null && !matches.isEmpty()) {
+                    logToScreen("TRANSCRIPTION: " + matches.get(0));
+                }
+            }
+            @Override public void onPartialResults(Bundle b) {
+                ArrayList<String> matches = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                if (matches != null && !matches.isEmpty()) {
+                    runOnUiThread(() -> volumeText.setText("Live: " + matches.get(0)));
+                }
+            }
+            @Override public void onReadyForSpeech(Bundle params) {}
+            @Override public void onBeginningOfSpeech() {}
+            @Override public void onRmsChanged(float rmsdB) {}
+            @Override public void onBufferReceived(byte[] buffer) {}
+            @Override public void onEndOfSpeech() {}
+            @Override public void onError(int error) { logToScreen("STT Code: " + error); }
+            @Override public void onEvent(int eventType, Bundle params) {}
+        });
+    }
+
     @Override
     public void onPartialResult(Hypothesis hp) {
         if (hp != null && hp.getHypstr().contains("alexa")) {
-            recognizer.cancel(); 
+            wakeRecognizer.cancel(); 
             startCommandRecording();
         }
     }
@@ -92,9 +131,15 @@ public class MainActivity extends Activity implements RecognitionListener {
         if (isRecording) return;
         isRecording = true;
         runOnUiThread(() -> {
-            statusText.setText("RECORDING");
+            statusText.setText("LISTENING...");
             statusText.setTextColor(0xFF0000FF);
         });
+        
+        logToScreen(">>> Alexa detected. Recording + Transcribing...");
+        
+        // Start System Speech-to-Text simultaneously
+        runOnUiThread(() -> systemRecognizer.startListening(speechIntent));
+        
         new Thread(this::runAudioLoop).start();
     }
 
@@ -113,13 +158,12 @@ public class MainActivity extends Activity implements RecognitionListener {
             while (isRecording) {
                 int read = ar.read(buf, 0, buf.length);
                 if (read <= 0) continue;
-                
                 double sum = 0;
                 for (int i = 0; i < read; i++) sum += buf[i] * buf[i];
                 int rms = (int) Math.sqrt(sum / read);
 
-                if (total < 30) rollingBase = (rollingBase * 0.95) + (rms * 0.05);
-
+                if (total < 20) rollingBase = (rollingBase * 0.9) + (rms * 0.1);
+                
                 byte[] bData = new byte[read * 2];
                 for (int i = 0; i < read; i++) {
                     bData[i*2] = (byte)(buf[i] & 0xff);
@@ -128,33 +172,30 @@ public class MainActivity extends Activity implements RecognitionListener {
                 out.write(bData);
                 total++;
 
-                if (rms < (rollingBase * 1.2 + 100) && total > 20) {
+                // Wait time reduced: silence > 25 frames (~0.7 seconds)
+                if (rms < (rollingBase * 1.3 + 80) && total > 15) {
                     silence++;
                 } else {
                     silence = 0;
                 }
 
-                if (silence > 62 || total > 312) break;
-                
-                if (total % 10 == 0) {
-                    final int displayRms = rms;
-                    final int displayBase = (int) rollingBase;
-                    runOnUiThread(() -> volumeText.setText("Vol: " + displayRms + " | Base: " + displayBase));
-                }
+                if (silence > 25 || total > 350) break;
             }
             ar.stop(); ar.release();
             
+            // Stop transcription engine
+            runOnUiThread(() -> systemRecognizer.stopListening());
+            
             File wav = new File(getExternalFilesDir(null), "cmd_" + System.currentTimeMillis() + ".wav");
             rawToWave(pcm, wav);
-            logToScreen("Saved: " + wav.getName());
+            logToScreen("File Saved: " + wav.getName());
         } catch (Exception e) { logToScreen("Rec Fail"); }
         
         isRecording = false;
         runOnUiThread(() -> {
-            recognizer.startListening("WAKE");
+            wakeRecognizer.startListening("WAKE");
             statusText.setText("READY");
             statusText.setTextColor(0xFF00FF00);
-            volumeText.setText("Volume: N/A");
         });
     }
 
@@ -164,7 +205,6 @@ public class MainActivity extends Activity implements RecognitionListener {
     }
 
     private void copyAssets(File assetDir) throws IOException {
-        // ADDED missing files to the copy list
         String[] files = {"en-us-ptm/mdef", "en-us-ptm/means", "en-us-ptm/sendump", 
                           "en-us-ptm/variances", "en-us-ptm/transition_matrices", 
                           "en-us-ptm/noisedict", "en-us-ptm/feat.params", "custom.dict"};
@@ -195,6 +235,12 @@ public class MainActivity extends Activity implements RecognitionListener {
     @Override public void onResult(Hypothesis h) {}
     @Override public void onBeginningOfSpeech() {}
     @Override public void onEndOfSpeech() {}
-    @Override public void onError(Exception e) { logToScreen("PS Error: " + e.getMessage()); }
+    @Override public void onError(Exception e) {}
     @Override public void onTimeout() {}
+
+    @Override protected void onDestroy() {
+        super.onDestroy();
+        if (wakeRecognizer != null) wakeRecognizer.shutdown();
+        if (systemRecognizer != null) systemRecognizer.destroy();
+    }
 }
