@@ -26,6 +26,7 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
     
     private TextView statusText, volumeText, logText, sensLabel;
     private boolean isRecording = false;
+    private boolean hasLoggedRms = false; // To prevent log spam
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -38,17 +39,24 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
         sensLabel = findViewById(R.id.sensLabel);
         SeekBar sensSlider = findViewById(R.id.sensSlider);
 
-        systemRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
-        speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-        speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
-        speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
-        // Explicitly request offline mode for older Google App versions
-        speechIntent.putExtra("android.speech.extra.PREFER_OFFLINE", true); 
+        logToScreen("=== V8 Deep Debug Boot ===");
 
-        setupSystemSpeechListener();
+        // 1. Explicitly check if the device even has a Speech Recognizer
+        boolean isAvailable = SpeechRecognizer.isRecognitionAvailable(this);
+        logToScreen("STT Engine Available on Device: " + isAvailable);
 
-        logToScreen("V7.1 Hub Booting (Hardware Lock Fix)...");
+        if (isAvailable) {
+            systemRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+            speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
+            speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+            speechIntent.putExtra("android.speech.extra.PREFER_OFFLINE", true); 
+            setupSystemSpeechListener();
+            logToScreen("STT Engine Initialized.");
+        } else {
+            logToScreen("CRITICAL: Google App is missing or disabled!");
+        }
 
         sensSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar s, int p, boolean f) {
@@ -72,7 +80,10 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
                 String kws = "alexa /1e-" + sensitivity + "/\n";
                 try (FileOutputStream fos = new FileOutputStream(kwsFile)) { fos.write(kws.getBytes()); }
 
-                if (wakeRecognizer != null) { wakeRecognizer.cancel(); wakeRecognizer.shutdown(); }
+                if (wakeRecognizer != null) { 
+                    wakeRecognizer.cancel(); 
+                    wakeRecognizer.shutdown(); 
+                }
 
                 wakeRecognizer = SpeechRecognizerSetup.defaultSetup()
                         .setAcousticModel(new File(assetDir, "en-us-ptm"))
@@ -85,22 +96,59 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
                     wakeRecognizer.startListening("WAKE");
                     statusText.setText("READY");
                     statusText.setTextColor(0xFF00FF00);
-                    logToScreen("Listening for Alexa...");
+                    logToScreen("PocketSphinx: Listening for Alexa...");
                 });
-            } catch (Exception e) { logToScreen("Init Error: " + e.getMessage()); }
+            } catch (Exception e) { logToScreen("PS Init Error: " + e.getMessage()); }
         }).start();
     }
 
     private void setupSystemSpeechListener() {
         systemRecognizer.setRecognitionListener(new RecognitionListener() {
+            @Override public void onReadyForSpeech(Bundle params) {
+                logToScreen("STT Callback: onReadyForSpeech (Mic opened)");
+            }
+            @Override public void onBeginningOfSpeech() {
+                logToScreen("STT Callback: onBeginningOfSpeech (User talking)");
+            }
+            @Override public void onRmsChanged(float rmsdB) {
+                // Only log this once per session to avoid crashing the UI with log spam
+                if (!hasLoggedRms) {
+                    logToScreen("STT Callback: onRmsChanged (Audio flowing!)");
+                    hasLoggedRms = true;
+                }
+            }
+            @Override public void onBufferReceived(byte[] buffer) { }
+            @Override public void onEndOfSpeech() {
+                logToScreen("STT Callback: onEndOfSpeech (Silence detected)");
+                runOnUiThread(() -> {
+                    statusText.setText("PROCESSING...");
+                    statusText.setTextColor(0xFFFFA500); 
+                });
+            }
+            @Override public void onError(int error) { 
+                String message = "Code " + error;
+                switch (error) {
+                    case SpeechRecognizer.ERROR_AUDIO: message = "Audio recording error (Hardware Locked)"; break;
+                    case SpeechRecognizer.ERROR_CLIENT: message = "Client side error"; break;
+                    case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: message = "Insufficient permissions"; break;
+                    case SpeechRecognizer.ERROR_NETWORK: message = "Network error"; break;
+                    case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: message = "Network timeout"; break;
+                    case SpeechRecognizer.ERROR_NO_MATCH: message = "No match (Did not understand)"; break;
+                    case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: message = "RecognitionService busy"; break;
+                    case SpeechRecognizer.ERROR_SERVER: message = "Server error"; break;
+                    case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: message = "Speech timeout (Nothing heard)"; break;
+                }
+                logToScreen("STT Error Callback: " + message); 
+                restartWakeWord();
+            }
             @Override public void onResults(Bundle b) {
                 ArrayList<String> matches = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                 if (matches != null && !matches.isEmpty()) {
                     String transcription = matches.get(0);
-                    logToScreen("TRANSCRIPTION: " + transcription);
+                    logToScreen("STT Result: " + transcription);
                     runOnUiThread(() -> volumeText.setText("Cmd: " + transcription));
                 } else {
-                    logToScreen("Google STT returned empty.");
+                    logToScreen("STT Result: NULL/EMPTY");
                 }
                 restartWakeWord();
             }
@@ -110,37 +158,6 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
                     runOnUiThread(() -> volumeText.setText("Live: " + matches.get(0)));
                 }
             }
-            @Override public void onReadyForSpeech(Bundle params) {
-                logToScreen("Google STT is listening...");
-            }
-            @Override public void onBeginningOfSpeech() {
-                logToScreen("Speech detected by Google...");
-            }
-            @Override public void onRmsChanged(float rmsdB) {}
-            @Override public void onBufferReceived(byte[] buffer) {}
-            @Override public void onEndOfSpeech() {
-                runOnUiThread(() -> {
-                    statusText.setText("PROCESSING...");
-                    statusText.setTextColor(0xFFFFA500); // Orange
-                });
-                logToScreen("Speech ended. Processing...");
-            }
-            @Override public void onError(int error) { 
-                String message = "Unknown";
-                switch (error) {
-                    case SpeechRecognizer.ERROR_AUDIO: message = "Audio recording error (Mic locked?)"; break;
-                    case SpeechRecognizer.ERROR_CLIENT: message = "Client side error"; break;
-                    case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: message = "Insufficient permissions"; break;
-                    case SpeechRecognizer.ERROR_NETWORK: message = "Network error (No offline model?)"; break;
-                    case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: message = "Network timeout"; break;
-                    case SpeechRecognizer.ERROR_NO_MATCH: message = "No match (Didn't catch that)"; break;
-                    case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: message = "RecognitionService busy"; break;
-                    case SpeechRecognizer.ERROR_SERVER: message = "Error from server"; break;
-                    case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: message = "No speech input"; break;
-                }
-                logToScreen("STT Error: " + message); 
-                restartWakeWord();
-            }
             @Override public void onEvent(int eventType, Bundle params) {}
         });
     }
@@ -148,7 +165,8 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
     @Override
     public void onPartialResult(Hypothesis hp) {
         if (hp != null && hp.getHypstr().contains("alexa")) {
-            wakeRecognizer.cancel(); 
+            // Use STOP instead of CANCEL. Stop forces the AudioRecord thread to finish gracefully.
+            wakeRecognizer.stop(); 
             startCommandTranscription();
         }
     }
@@ -156,18 +174,27 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
     private synchronized void startCommandTranscription() {
         if (isRecording) return;
         isRecording = true;
+        hasLoggedRms = false;
+        
         runOnUiThread(() -> {
             statusText.setText("LISTENING (Google STT)");
             statusText.setTextColor(0xFF0000FF);
         });
         
-        logToScreen(">>> Alexa detected. Releasing hardware mic...");
+        logToScreen(">>> Alexa detected.");
+        logToScreen("Step 1: PS Engine stopped.");
         
-        // CRITICAL FIX: Give PocketSphinx 400ms to completely release the microphone
+        // Wait 600ms to guarantee OS-level hardware mic release
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            logToScreen("Handing mic to Google...");
-            systemRecognizer.startListening(speechIntent);
-        }, 400);
+            logToScreen("Step 2: Triggering systemRecognizer.startListening...");
+            try {
+                systemRecognizer.startListening(speechIntent);
+                logToScreen("Step 3: Intent fired. Waiting for callbacks...");
+            } catch (Exception e) {
+                logToScreen("CRITICAL STT CRASH: " + e.getMessage());
+                restartWakeWord();
+            }
+        }, 600);
     }
 
     private void restartWakeWord() {
