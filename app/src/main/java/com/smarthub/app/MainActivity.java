@@ -14,6 +14,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 public class MainActivity extends Activity {
     private static final int SAMPLE_RATE = 16000;
@@ -23,36 +26,69 @@ public class MainActivity extends Activity {
     
     private Model model;
     private Recognizer recognizer;
+    
+    // UI Elements
     private TextView statusText;
+    private TextView volumeText;
+    private TextView logText;
 
     private boolean wakeWordDetected = false;
     private FileOutputStream pcmOut;
     private int silenceFrames = 0;
-    // Lower threshold = requires more absolute silence to trigger stop
-    private final int SILENCE_THRESHOLD = 500; 
+    private int totalRecordingFrames = 0;
+    
+    // RMS threshold is usually between 50 and 300 for a quiet room.
+    private final int SILENCE_RMS_THRESHOLD = 200; 
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        statusText = new TextView(this);
-        statusText.setText("Initializing System...");
-        statusText.setTextSize(24f);
-        setContentView(statusText);
+        setContentView(R.layout.activity_main);
+
+        statusText = findViewById(R.id.statusText);
+        volumeText = findViewById(R.id.volumeText);
+        logText = findViewById(R.id.logText);
+
+        logToScreen("System Booting...");
 
         new Thread(() -> {
             try {
+                logToScreen("Unpacking AI Model (May take a minute on J2)...");
                 String modelPath = copyAssets();
                 model = new Model(modelPath);
                 recognizer = new Recognizer(model, SAMPLE_RATE);
-                runOnUiThread(() -> statusText.setText("Ready. Listening for 'alexa'"));
+                
+                runOnUiThread(() -> {
+                    statusText.setText("READY");
+                    statusText.setTextColor(0xFF00FF00); // Green
+                });
+                logToScreen("Model loaded. Listening for 'alexa'...");
                 startMicrophone();
             } catch (Exception e) {
-                Log.e("SmartHub", "Init error", e);
-                runOnUiThread(() -> statusText.setText("Error: " + e.getMessage()));
+                logToScreen("ERROR: " + e.getMessage());
+                runOnUiThread(() -> {
+                    statusText.setText("ERROR");
+                    statusText.setTextColor(0xFFFF0000); // Red
+                });
             }
         }).start();
     }
 
+    private void logToScreen(String message) {
+        String time = new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date());
+        String logEntry = "[" + time + "] " + message + "\n";
+        runOnUiThread(() -> {
+            logText.append(logEntry);
+            // Optional: Log to standard logcat too
+            Log.d("SmartHub", message); 
+        });
+    }
+
+    private void updateVolumeUI(int volume) {
+        runOnUiThread(() -> volumeText.setText("Current Volume (RMS): " + volume));
+    }
+
+    // Asset copying remains the same
     private String copyAssets() {
         File assetDir = getExternalFilesDir(null);
         File modelDir = new File(assetDir, "model");
@@ -75,11 +111,8 @@ public class MainActivity extends Activity {
                     OutputStream out = new FileOutputStream(dest);
                     byte[] buffer = new byte[1024];
                     int read;
-                    while ((read = in.read(buffer)) != -1) {
-                        out.write(buffer, 0, read);
-                    }
-                    in.close();
-                    out.close();
+                    while ((read = in.read(buffer)) != -1) { out.write(buffer, 0, read); }
+                    in.close(); out.close();
                 } else {
                     new File(dest).mkdirs();
                     copyAssetFolder(src, dest);
@@ -96,38 +129,57 @@ public class MainActivity extends Activity {
 
         recordingThread = new Thread(() -> {
             short[] buffer = new short[512];
+            int loopCounter = 0;
+            
             while (isListening) {
                 int read = audioRecord.read(buffer, 0, buffer.length);
                 if (read > 0) {
+                    
+                    // Calculate RMS (Root Mean Square) for volume
+                    double sum = 0;
+                    for (int i = 0; i < read; i++) {
+                        sum += buffer[i] * buffer[i];
+                    }
+                    int rms = (int) Math.sqrt(sum / read);
+                    
+                    // Update UI volume every ~15 frames to prevent UI lag
+                    loopCounter++;
+                    if (loopCounter % 15 == 0) { updateVolumeUI(rms); }
+
                     if (!wakeWordDetected) {
-                        // Phase: Wake Word Spotting
+                        // Phase 1: Wake Word Spotting
                         if (recognizer.acceptWaveForm(buffer, read)) {
                             if (recognizer.getResult().toLowerCase().contains("alexa")) startCommandRecording();
                         } else {
                             if (recognizer.getPartialResult().toLowerCase().contains("alexa")) startCommandRecording();
                         }
                     } else {
-                        // Phase: Command Recording & Silence Detection
+                        // Phase 2: Command Recording & Silence Detection
                         try {
                             byte[] bData = new byte[read * 2];
-                            int maxAmp = 0;
                             for (int i = 0; i < read; i++) {
-                                maxAmp = Math.max(maxAmp, Math.abs(buffer[i]));
                                 bData[i * 2] = (byte) (buffer[i] & 0x00FF);
                                 bData[(i * 2) + 1] = (byte) (buffer[i] >> 8);
                             }
                             pcmOut.write(bData);
+                            totalRecordingFrames++;
 
-                            if (maxAmp < SILENCE_THRESHOLD) {
+                            if (rms < SILENCE_RMS_THRESHOLD) {
                                 silenceFrames++;
                             } else {
-                                silenceFrames = 0;
+                                silenceFrames = 0; 
                             }
 
-                            // 2 Seconds of silence = (16000 / 512) * 2 ≈ 62 frames
-                            if (silenceFrames > 62) {
+                            // 1.5 Seconds of silence = (16000 / 512) * 1.5 ≈ 47 frames
+                            // Hard timeout: 8 seconds maximum recording ≈ 250 frames
+                            if (silenceFrames > 47) {
+                                logToScreen("Silence detected. Stopping.");
+                                stopCommandRecording();
+                            } else if (totalRecordingFrames > 250) {
+                                logToScreen("Max time reached. Force stopping.");
                                 stopCommandRecording();
                             }
+                            
                         } catch (Exception e) { e.printStackTrace(); }
                     }
                 }
@@ -139,21 +191,32 @@ public class MainActivity extends Activity {
     private void startCommandRecording() {
         wakeWordDetected = true;
         silenceFrames = 0;
-        runOnUiThread(() -> statusText.setText("Listening to Command..."));
+        totalRecordingFrames = 0;
+        
+        runOnUiThread(() -> {
+            statusText.setText("LISTENING TO COMMAND");
+            statusText.setTextColor(0xFF0000FF); // Blue
+        });
+        logToScreen(">>> Wake word detected!");
+        
         try {
-            File dir = Environment.getExternalStorageDirectory();
-            File file = new File(dir, "command_" + System.currentTimeMillis() + ".pcm");
+            File dir = getExternalFilesDir(null); // Safer storage location
+            File file = new File(dir, "cmd_" + System.currentTimeMillis() + ".pcm");
             pcmOut = new FileOutputStream(file);
-        } catch (Exception e) { e.printStackTrace(); }
+            logToScreen("Recording to: " + file.getName());
+        } catch (Exception e) { logToScreen("Storage Error: " + e.getMessage()); }
     }
 
     private void stopCommandRecording() {
         wakeWordDetected = false;
-        try {
-            if (pcmOut != null) pcmOut.close();
-        } catch (Exception e) {}
+        try { if (pcmOut != null) pcmOut.close(); } catch (Exception e) {}
         recognizer.reset();
-        runOnUiThread(() -> statusText.setText("Saved command. Listening for 'alexa'"));
+        
+        runOnUiThread(() -> {
+            statusText.setText("READY");
+            statusText.setTextColor(0xFF00FF00); // Green
+        });
+        logToScreen("<<< Saved command. Resuming wake word search.");
     }
 
     @Override
