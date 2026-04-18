@@ -26,7 +26,7 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
     
     private TextView statusText, volumeText, logText, sensLabel;
     private boolean isRecording = false;
-    private boolean hasLoggedRms = false; // To prevent log spam
+    private boolean hasLoggedRms = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -39,11 +39,10 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
         sensLabel = findViewById(R.id.sensLabel);
         SeekBar sensSlider = findViewById(R.id.sensSlider);
 
-        logToScreen("=== V8 Deep Debug Boot ===");
+        logToScreen("=== V9 Deep Hardware Release ===");
 
-        // 1. Explicitly check if the device even has a Speech Recognizer
         boolean isAvailable = SpeechRecognizer.isRecognitionAvailable(this);
-        logToScreen("STT Engine Available on Device: " + isAvailable);
+        logToScreen("STT Engine Available: " + isAvailable);
 
         if (isAvailable) {
             systemRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
@@ -53,9 +52,8 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
             speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
             speechIntent.putExtra("android.speech.extra.PREFER_OFFLINE", true); 
             setupSystemSpeechListener();
-            logToScreen("STT Engine Initialized.");
         } else {
-            logToScreen("CRITICAL: Google App is missing or disabled!");
+            logToScreen("CRITICAL: STT App is missing!");
         }
 
         sensSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -96,7 +94,7 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
                     wakeRecognizer.startListening("WAKE");
                     statusText.setText("READY");
                     statusText.setTextColor(0xFF00FF00);
-                    logToScreen("PocketSphinx: Listening for Alexa...");
+                    logToScreen("PS: Listening for Alexa...");
                 });
             } catch (Exception e) { logToScreen("PS Init Error: " + e.getMessage()); }
         }).start();
@@ -105,21 +103,20 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
     private void setupSystemSpeechListener() {
         systemRecognizer.setRecognitionListener(new RecognitionListener() {
             @Override public void onReadyForSpeech(Bundle params) {
-                logToScreen("STT Callback: onReadyForSpeech (Mic opened)");
+                logToScreen("STT: Mic successfully opened!");
             }
             @Override public void onBeginningOfSpeech() {
-                logToScreen("STT Callback: onBeginningOfSpeech (User talking)");
+                logToScreen("STT: Hearing speech...");
             }
             @Override public void onRmsChanged(float rmsdB) {
-                // Only log this once per session to avoid crashing the UI with log spam
                 if (!hasLoggedRms) {
-                    logToScreen("STT Callback: onRmsChanged (Audio flowing!)");
+                    logToScreen("STT: Audio flowing smoothly.");
                     hasLoggedRms = true;
                 }
             }
             @Override public void onBufferReceived(byte[] buffer) { }
             @Override public void onEndOfSpeech() {
-                logToScreen("STT Callback: onEndOfSpeech (Silence detected)");
+                logToScreen("STT: Silence detected. Processing.");
                 runOnUiThread(() -> {
                     statusText.setText("PROCESSING...");
                     statusText.setTextColor(0xFFFFA500); 
@@ -129,16 +126,16 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
                 String message = "Code " + error;
                 switch (error) {
                     case SpeechRecognizer.ERROR_AUDIO: message = "Audio recording error (Hardware Locked)"; break;
-                    case SpeechRecognizer.ERROR_CLIENT: message = "Client side error"; break;
+                    case SpeechRecognizer.ERROR_CLIENT: message = "Client error"; break;
                     case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: message = "Insufficient permissions"; break;
                     case SpeechRecognizer.ERROR_NETWORK: message = "Network error"; break;
                     case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: message = "Network timeout"; break;
-                    case SpeechRecognizer.ERROR_NO_MATCH: message = "No match (Did not understand)"; break;
-                    case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: message = "RecognitionService busy"; break;
+                    case SpeechRecognizer.ERROR_NO_MATCH: message = "No match"; break;
+                    case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: message = "Service busy"; break;
                     case SpeechRecognizer.ERROR_SERVER: message = "Server error"; break;
-                    case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: message = "Speech timeout (Nothing heard)"; break;
+                    case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: message = "Speech timeout"; break;
                 }
-                logToScreen("STT Error Callback: " + message); 
+                logToScreen("STT ERROR: " + message); 
                 restartWakeWord();
             }
             @Override public void onResults(Bundle b) {
@@ -148,7 +145,7 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
                     logToScreen("STT Result: " + transcription);
                     runOnUiThread(() -> volumeText.setText("Cmd: " + transcription));
                 } else {
-                    logToScreen("STT Result: NULL/EMPTY");
+                    logToScreen("STT Result: EMPTY");
                 }
                 restartWakeWord();
             }
@@ -165,8 +162,10 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
     @Override
     public void onPartialResult(Hypothesis hp) {
         if (hp != null && hp.getHypstr().contains("alexa")) {
-            // Use STOP instead of CANCEL. Stop forces the AudioRecord thread to finish gracefully.
-            wakeRecognizer.stop(); 
+            // CRITICAL CHANGE: Completely destroy the engine to force hardware mic release
+            wakeRecognizer.cancel();
+            wakeRecognizer.shutdown();
+            wakeRecognizer = null;
             startCommandTranscription();
         }
     }
@@ -182,29 +181,32 @@ public class MainActivity extends Activity implements edu.cmu.pocketsphinx.Recog
         });
         
         logToScreen(">>> Alexa detected.");
-        logToScreen("Step 1: PS Engine stopped.");
+        logToScreen("Step 1: PS Engine DESTROYED.");
         
-        // Wait 600ms to guarantee OS-level hardware mic release
+        // Wait a full 1.0 seconds to guarantee OS-level mic reset
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            logToScreen("Step 2: Triggering systemRecognizer.startListening...");
+            logToScreen("Step 2: Triggering systemRecognizer...");
             try {
                 systemRecognizer.startListening(speechIntent);
-                logToScreen("Step 3: Intent fired. Waiting for callbacks...");
+                logToScreen("Step 3: Intent fired. Waiting...");
             } catch (Exception e) {
                 logToScreen("CRITICAL STT CRASH: " + e.getMessage());
                 restartWakeWord();
             }
-        }, 600);
+        }, 1000); 
     }
 
     private void restartWakeWord() {
         isRecording = false;
         runOnUiThread(() -> {
-            wakeRecognizer.startListening("WAKE");
-            statusText.setText("READY");
-            statusText.setTextColor(0xFF00FF00);
+            statusText.setText("REBOOTING ENGINE...");
+            statusText.setTextColor(0xFFFFA500);
             volumeText.setText("Volume: N/A");
         });
+        
+        // We have to completely rebuild the PS engine since we destroyed it
+        SeekBar sensSlider = findViewById(R.id.sensSlider);
+        initPocketSphinx(Math.max(sensSlider.getProgress(), 1));
     }
 
     private void logToScreen(String msg) {
